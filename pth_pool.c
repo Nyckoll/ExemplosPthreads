@@ -1,119 +1,334 @@
-/* File:  
- *    pth_pool.c
- *
- * Purpose:
- *    Implementação de um pool de threads
- *
- *
- * Compile:  gcc -g -Wall -o pth_pool pth_pool.c -lpthread -lrt
- * Usage:    ./pth_hello
- */
 #include <stdio.h>
 #include <stdlib.h>
-#include <pthread.h> 
+#include <pthread.h>
 #include <unistd.h>
-#include <semaphore.h>
 #include <time.h>
 
-#define THREAD_NUM 4    // Tamanho do pool de threads
-#define BUFFER_SIZE 256 // Númermo máximo de tarefas enfileiradas
+#define THREAD_NUM 3
+#define BUFFER_SIZE 10
+#define RUN_TIME 5
 
-typedef struct Task{
-   int a, b;
-}Task;
+typedef struct {
+    int clock[THREAD_NUM];
+} VectorClock;
 
-Task taskQueue[BUFFER_SIZE];
+VectorClock clockQueue[BUFFER_SIZE];
 int taskCount = 0;
+int running = 1;
 
 pthread_mutex_t mutex;
-
 pthread_cond_t condFull;
 pthread_cond_t condEmpty;
 
-void executeTask(Task* task, int id){
-   int result = task->a + task->b;
-   printf("(Thread %d) Sum of %d and %d is %d\n", id, task->a, task->b, result);
+int produced_count = 0;
+int consumed_count = 0;
+
+void produceVectorClock(VectorClock *clock, int id) {
+    for (int i = 0; i < THREAD_NUM; i++) {
+        clock->clock[i] = rand() % 100;
+    }
+    printf("(Produtor %d): ", id);
+    for (int i = 0; i < THREAD_NUM; i++) {
+        printf("%d ", clock->clock[i]);
+    }
+    printf("\n");
 }
 
-Task getTask(){
-   pthread_mutex_lock(&mutex);
-   
-   while (taskCount == 0){
-      pthread_cond_wait(&condEmpty, &mutex);
-   }
-   
-   Task task = taskQueue[0];
-   int i;
-   for (i = 0; i < taskCount - 1; i++){
-      taskQueue[i] = taskQueue[i+1];
-   }
-   taskCount--;
-   
-   pthread_mutex_unlock(&mutex);
-   pthread_cond_signal(&condFull);
-   return task;
+void consumeVectorClock(VectorClock *clock, int id) {
+    printf("(Consumidor %d): ", id);
+    for (int i = 0; i < THREAD_NUM; i++) {
+        printf("%d ", clock->clock[i]);
+    }
+    printf("\n");
 }
 
-void submitTask(Task task){
-   pthread_mutex_lock(&mutex);
-
-   while (taskCount == BUFFER_SIZE){
-      pthread_cond_wait(&condFull, &mutex);
-   }
-
-   taskQueue[taskCount] = task;
-   taskCount++;
-
-   pthread_mutex_unlock(&mutex);
-   pthread_cond_signal(&condEmpty);
+VectorClock getVectorClock() {
+    pthread_mutex_lock(&mutex);
+    while (taskCount == 0 && running) {
+        pthread_cond_wait(&condEmpty, &mutex);
+    }
+    VectorClock clock;
+    if (running) {
+        clock = clockQueue[0];
+        for (int i = 0; i < taskCount - 1; i++) {
+            clockQueue[i] = clockQueue[i + 1];
+        }
+        taskCount--;
+    }
+    pthread_mutex_unlock(&mutex);
+    pthread_cond_signal(&condFull);
+    return clock;
 }
 
-void *startThread(void* args);  
+void submitVectorClock(VectorClock clock) {
+    pthread_mutex_lock(&mutex);
+    while (taskCount == BUFFER_SIZE && running) {
+        pthread_cond_wait(&condFull, &mutex);
+    }
+    if (running) {
+        clockQueue[taskCount] = clock;
+        taskCount++;
+    }
+    pthread_mutex_unlock(&mutex);
+    pthread_cond_signal(&condEmpty);
+}
 
-/*--------------------------------------------------------------------*/
-int main(int argc, char* argv[]) {
-   pthread_mutex_init(&mutex, NULL);
-   
-   pthread_cond_init(&condEmpty, NULL);
-   pthread_cond_init(&condFull, NULL);
 
-   pthread_t thread[THREAD_NUM]; 
-   long i;
-   for (i = 0; i < THREAD_NUM; i++){  
-      if (pthread_create(&thread[i], NULL, &startThread, (void*) i) != 0) {
-         perror("Failed to create the thread");
-      }  
-   }
-   
-   srand(time(NULL));
-   for (i = 0; i < 500; i++){
-      Task t = {
-         .a = rand() % 100,
-         .b = rand() % 100
-      };
-      submitTask(t);
-   }
-   
-   for (i = 0; i < THREAD_NUM; i++){  
-      if (pthread_join(thread[i], NULL) != 0) {
-         perror("Failed to join the thread");
-      }  
-   }
-   
-   pthread_mutex_destroy(&mutex);
-   pthread_cond_destroy(&condEmpty);
-   pthread_cond_destroy(&condFull);
-   return 0;
-}  /* main */
 
-/*-------------------------------------------------------------------*/
-void *startThread(void* args) {
-   long id = (long) args; 
-   while (1){ 
-      Task task = getTask();
-      executeTask(&task, id);
-      sleep(rand()%5);
-   }
-   return NULL;
-} 
+// Cenário 1: Fila ficará cheia (Taxa alta do produtor, taxa baixa do consumidor)
+void *producer(void *args) {
+    long id = (long)args;
+    while (running) {
+        VectorClock clock;
+        produceVectorClock(&clock, id);
+        submitVectorClock(clock);
+        produced_count++;
+        sleep(1);  // Taxa alta: Produz 1 relógio por segundo
+    }
+    return NULL;
+}
 
+void *consumer(void *args) {
+    long id = (long)args;
+    while (running) {
+        VectorClock clock = getVectorClock();
+        if (running) {
+            consumeVectorClock(&clock, id);
+            consumed_count++;
+        }
+        sleep(2);  // Taxa baixa: Consome 1 relógio a cada 2 segundos
+    }
+    return NULL;
+}
+
+// Alternativa para o Cenário 2: Fila ficará vazia (Taxa baixa do produtor, taxa alta do consumidor)
+// Descomente as funções abaixo para o Cenário 2
+/*
+void *producer(void *args) {
+    long id = (long)args;
+    while (running) {
+        VectorClock clock;
+        produceVectorClock(&clock, id);
+        submitVectorClock(clock);
+        produced_count++;
+        sleep(3);  // Taxa baixa: Produz 1 relógio a cada 2 segundos
+    }
+    return NULL;
+}
+
+void *consumer(void *args) {
+    long id = (long)args;
+    while (running) {
+        VectorClock clock = getVectorClock();
+        if (running) {
+            consumeVectorClock(&clock, id);
+            consumed_count++;
+        }
+        sleep(0.5);  // Taxa alta: Consome 1 relógio por segundo
+    }
+    return NULL;
+}
+
+*/
+int main() {
+    pthread_mutex_init(&mutex, NULL);
+    pthread_cond_init(&condEmpty, NULL);
+    pthread_cond_init(&condFull, NULL);
+
+    pthread_t producers[THREAD_NUM];
+    pthread_t consumers[THREAD_NUM];
+
+    for (long i = 0; i < THREAD_NUM; i++) {
+        pthread_create(&producers[i], NULL, &producer, (void *)i);
+        pthread_create(&consumers[i], NULL, &consumer, (void *)i);
+    }
+
+    sleep(RUN_TIME);
+
+    running = 0;
+
+    pthread_cond_broadcast(&condEmpty);
+    pthread_cond_broadcast(&condFull);
+
+    for (int i = 0; i < THREAD_NUM; i++) {
+        pthread_join(producers[i], NULL);
+        pthread_join(consumers[i], NULL);
+    }
+
+    pthread_mutex_destroy(&mutex);
+    pthread_cond_destroy(&condEmpty);
+    pthread_cond_destroy(&condFull);
+
+    printf("\nFim da execução. Tempo de execução: %ds.\n", RUN_TIME);
+    printf("Total produtores: %d\n", produced_count);
+    printf("Total consumidores: %d\n", consumed_count);
+
+    return 0;
+}
+#include <stdio.h>
+#include <stdlib.h>
+#include <pthread.h>
+#include <unistd.h>
+#include <time.h>
+
+#define THREAD_NUM 3
+#define BUFFER_SIZE 10
+#define RUN_TIME 5
+
+typedef struct {
+    int clock[THREAD_NUM];
+} VectorClock;
+
+VectorClock clockQueue[BUFFER_SIZE];
+int taskCount = 0;
+int running = 1;
+
+pthread_mutex_t mutex;
+pthread_cond_t condFull;
+pthread_cond_t condEmpty;
+
+int produced_count = 0;
+int consumed_count = 0;
+
+void produceVectorClock(VectorClock *clock, int id) {
+    for (int i = 0; i < THREAD_NUM; i++) {
+        clock->clock[i] = rand() % 100;
+    }
+    printf("(Produtor %d): ", id);
+    for (int i = 0; i < THREAD_NUM; i++) {
+        printf("%d ", clock->clock[i]);
+    }
+    printf("\n");
+}
+
+void consumeVectorClock(VectorClock *clock, int id) {
+    printf("(Consumidor %d): ", id);
+    for (int i = 0; i < THREAD_NUM; i++) {
+        printf("%d ", clock->clock[i]);
+    }
+    printf("\n");
+}
+
+VectorClock getVectorClock() {
+    pthread_mutex_lock(&mutex);
+    while (taskCount == 0 && running) {
+        pthread_cond_wait(&condEmpty, &mutex);
+    }
+    VectorClock clock;
+    if (running) {
+        clock = clockQueue[0];
+        for (int i = 0; i < taskCount - 1; i++) {
+            clockQueue[i] = clockQueue[i + 1];
+        }
+        taskCount--;
+    }
+    pthread_mutex_unlock(&mutex);
+    pthread_cond_signal(&condFull);
+    return clock;
+}
+
+void submitVectorClock(VectorClock clock) {
+    pthread_mutex_lock(&mutex);
+    while (taskCount == BUFFER_SIZE && running) {
+        pthread_cond_wait(&condFull, &mutex);
+    }
+    if (running) {
+        clockQueue[taskCount] = clock;
+        taskCount++;
+    }
+    pthread_mutex_unlock(&mutex);
+    pthread_cond_signal(&condEmpty);
+}
+
+
+
+// Cenário 1: Fila ficará cheia (Taxa alta do produtor, taxa baixa do consumidor)
+void *producer(void *args) {
+    long id = (long)args;
+    while (running) {
+        VectorClock clock;
+        produceVectorClock(&clock, id);
+        submitVectorClock(clock);
+        produced_count++;
+        sleep(1);  // Taxa alta: Produz 1 relógio por segundo
+    }
+    return NULL;
+}
+
+void *consumer(void *args) {
+    long id = (long)args;
+    while (running) {
+        VectorClock clock = getVectorClock();
+        if (running) {
+            consumeVectorClock(&clock, id);
+            consumed_count++;
+        }
+        sleep(2);  // Taxa baixa: Consome 1 relógio a cada 2 segundos
+    }
+    return NULL;
+}
+
+// Alternativa para o Cenário 2: Fila ficará vazia (Taxa baixa do produtor, taxa alta do consumidor)
+// Descomente as funções abaixo para o Cenário 2
+/*
+void *producer(void *args) {
+    long id = (long)args;
+    while (running) {
+        VectorClock clock;
+        produceVectorClock(&clock, id);
+        submitVectorClock(clock);
+        produced_count++;
+        sleep(3);  // Taxa baixa: Produz 1 relógio a cada 2 segundos
+    }
+    return NULL;
+}
+
+void *consumer(void *args) {
+    long id = (long)args;
+    while (running) {
+        VectorClock clock = getVectorClock();
+        if (running) {
+            consumeVectorClock(&clock, id);
+            consumed_count++;
+        }
+        sleep(0.5);  // Taxa alta: Consome 1 relógio por segundo
+    }
+    return NULL;
+}
+
+*/
+int main() {
+    pthread_mutex_init(&mutex, NULL);
+    pthread_cond_init(&condEmpty, NULL);
+    pthread_cond_init(&condFull, NULL);
+
+    pthread_t producers[THREAD_NUM];
+    pthread_t consumers[THREAD_NUM];
+
+    for (long i = 0; i < THREAD_NUM; i++) {
+        pthread_create(&producers[i], NULL, &producer, (void *)i);
+        pthread_create(&consumers[i], NULL, &consumer, (void *)i);
+    }
+
+    sleep(RUN_TIME);
+
+    running = 0;
+
+    pthread_cond_broadcast(&condEmpty);
+    pthread_cond_broadcast(&condFull);
+
+    for (int i = 0; i < THREAD_NUM; i++) {
+        pthread_join(producers[i], NULL);
+        pthread_join(consumers[i], NULL);
+    }
+
+    pthread_mutex_destroy(&mutex);
+    pthread_cond_destroy(&condEmpty);
+    pthread_cond_destroy(&condFull);
+
+    printf("\nFim da execução. Tempo de execução: %ds.\n", RUN_TIME);
+    printf("Total produtores: %d\n", produced_count);
+    printf("Total consumidores: %d\n", consumed_count);
+
+    return 0;
+}
